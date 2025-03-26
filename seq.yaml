@@ -1,0 +1,96 @@
+use_gpu: True
+seed: 2021
+state: INFO
+reproducibility: True
+checkpoint_dir: 'saved'
+show_progress: True
+save_dataloaders: True
+log_root: "./log/"
+
+#* dataset
+data_path: "./dataset/"
+#Specify which columns to read from which file, in this case from ml-1m.inter read user_id, item_id, rating, timestamp, and so on
+load_col:
+    inter: [user_id, item_id, rating, timestamp]
+field_separator: "\t" 
+seq_separator: " "
+USER_ID_FIELD: user_id
+ITEM_ID_FIELD: item_id
+RATING_FIELD: rating
+TIME_FIELD: timestamp
+
+#neg_sampling:
+#  uniform: 1
+NEG_PREFIX: neg_ 
+LABEL_FIELD: label 
+ITEM_LIST_LENGTH_FIELD: item_length
+LIST_SUFFIX: _list 
+MAX_ITEM_LIST_LENGTH: 50 
+POSITION_FIELD: position_id 
+
+#max_user_inter_num: 100
+min_user_inter_num: 5
+#max_item_inter_num: 100
+min_item_inter_num: 5
+#lowest_val:
+#    timestamp: 1546264800
+#highest_val:
+#    timestamp: 1577714400
+
+#* training settings
+epochs: 50
+train_batch_size: 256
+learner: adam
+learning_rate: 0.001
+training_neg_sample_num: 0
+eval_step: 1
+stopping_step: 10
+log_interval: 10
+fast_sample_eval: 1
+
+#* evalution settings
+eval_setting: TO_LS,full
+metrics: ["Hit","NDCG","Recall","GAUC","MRR","Precision", "MAP"]
+topk: [5, 10, 20]
+valid_metric: NDCG@10
+eval_batch_size: 1024
+weight_decay: 0
+eval_args:
+  split: { 'LS': 'valid_and_test' } # {'LS':[0.8,0.1,0.1]}
+  group_by: user
+  order: TO
+  mode: full
+repeatable: True
+loss_decimal_place: 4
+metric_decimal_place: 4
+
+repeatable: True
+loss_decimal_place: 4
+metric_decimal_place: 4
+
+lmd: 0.1
+lmd_sem: 0.1
+
+tau: 1
+
+# choose from {dot, cos}
+sim: 'dot'
+
+hidden_dropout_prob: 0.5
+attn_dropout_prob: 0.5
+
+loss_type : 'CE'
+
+train_r : 1
+
+noise : 'CLOSE'
+
+noise_r : 0
+
+lmd_tf : 0.5
+
+step: 8
+
+g_weight: 0.5
+noise_base: 0.01
+phi: 0.85
