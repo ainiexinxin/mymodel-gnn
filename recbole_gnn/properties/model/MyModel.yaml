@@ -11,3 +11,13 @@ loss_type: CE
 lmd: 0.1
 
 gnn_transform: sess_graph
+
+# choose from {dot, cos}
+sim: 'cos'
+
+tau: 1
+noise_base: 0.01
+grap_dropout_prob: 0.1
+rec_weight: 0.5
+cl_weight: 0.2
+seq_cl_weight: 0.5

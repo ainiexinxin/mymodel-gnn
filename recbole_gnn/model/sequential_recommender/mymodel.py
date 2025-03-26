@@ -41,25 +41,22 @@ class MyModel(SequentialRecommender):
         self.inner_size = config['inner_size']  # the dimensionality in feed-forward layer
         self.hidden_dropout_prob = config['hidden_dropout_prob']
         self.attn_dropout_prob = config['attn_dropout_prob']
+        self.graph_dropout_prob = config['grap_dropout_prob']
         self.hidden_act = config['hidden_act']
         self.layer_norm_eps = config['layer_norm_eps']
 
         self.batch_size = config['train_batch_size']
-        self.lmd = config['lmd']
-        self.lmd_tf = config['lmd_tf']
         self.tau = config['tau']
         self.sim = config['sim']
-
-        self.tau_plus = config['tau_plus']
-        self.beta = config['beta']
 
         self.initializer_range = config['initializer_range']
         self.loss_type = config['loss_type']
 
-        self.step = config['step']
         self.device = config['device']
-        self.g_weight = config['g_weight']
         self.noise_base = config['noise_base']
+        self.rec_weight = config['rec_weight']
+        self.cl_weight = config['cl_weight']
+        self.seq_cl_weight = config['seq_cl_weight']
 
         # define layers and loss
         self.item_embedding = nn.Embedding(self.n_items + 1, self.hidden_size, padding_idx=0)
@@ -94,7 +91,7 @@ class MyModel(SequentialRecommender):
         self.linear_2 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_3 = nn.Linear(self.hidden_size, 1, bias=False)
         self.linear_out = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=True)
-        self.dropout_g = nn.Dropout(0.1)
+        self.dropout_g = nn.Dropout(self.graph_dropout_prob)
 
         self.apply(self._init_weights)
 
@@ -264,9 +261,9 @@ class MyModel(SequentialRecommender):
     def calculate_loss(self, interaction):
         # cal loss
         loss = torch.tensor(0.0).to(self.device)
-        loss += 0.5 * self.rec_loss(interaction, self.forward)
-        loss += 0.5 * self.rec_loss(interaction, self.forward_gcn)
-        loss += self.cl_loss(interaction)
+        loss += self.rec_weight * self.rec_loss(interaction, self.forward)
+        loss += (1 - self.rec_weight) * self.rec_loss(interaction, self.forward_gcn)
+        loss += self.cl_weight * self.cl_loss(interaction)
         return loss
     
     def cl_loss(self, interaction):
@@ -279,12 +276,9 @@ class MyModel(SequentialRecommender):
         gnn_seq_output_1 = self.forward_gcn(interaction, item_seq, item_seq_len, True)
         gnn_seq_output_2 = self.forward_gcn(interaction, item_seq, item_seq_len, True)
 
-        # nce_logits, nce_labels = self.info_nce(tf_seq_output_1, tf_seq_output_2, temp=self.tau, batch_size=tf_seq_output_1.shape[0], sim=self.sim)
-        # loss += 0.01 * self.nce_fct(nce_logits, nce_labels)
+        loss += self.seq_cl_weight * self.infonce(tf_seq_output_f_1, tf_seq_output_f_2, temp=self.tau, batch_size=tf_seq_output_f_1.shape[0])
 
-        loss += 0.01 * self.infonce(tf_seq_output_f_1, tf_seq_output_f_2, temp=self.tau, batch_size=tf_seq_output_f_1.shape[0])
-
-        loss += 0.01 * self.infonce(gnn_seq_output_1, gnn_seq_output_2, temp=self.tau, batch_size=gnn_seq_output_1.shape[0])
+        loss += (1 - self.seq_cl_weight) * self.infonce(gnn_seq_output_1, gnn_seq_output_2, temp=self.tau, batch_size=gnn_seq_output_1.shape[0])
 
         return loss
     

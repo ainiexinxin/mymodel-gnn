@@ -68,29 +68,5 @@ repeatable: True
 loss_decimal_place: 4
 metric_decimal_place: 4
 
-lmd: 0.1
-lmd_sem: 0.1
 
-tau: 1
 
-# choose from {dot, cos}
-sim: 'dot'
-
-hidden_dropout_prob: 0.5
-attn_dropout_prob: 0.5
-
-loss_type : 'CE'
-
-train_r : 1
-
-noise : 'CLOSE'
-
-noise_r : 0
-
-lmd_tf : 0.5
-
-step: 8
-
-g_weight: 0.5
-noise_base: 0.01
-phi: 0.85
