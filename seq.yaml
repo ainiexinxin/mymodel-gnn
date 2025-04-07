@@ -32,6 +32,10 @@ POSITION_FIELD: position_id
 min_user_inter_num: 5
 #max_item_inter_num: 100
 min_item_inter_num: 5
+
+user_inter_num_interval: '[5,inf)' 
+item_inter_num_interval: '[5,inf)'
+
 #lowest_val:
 #    timestamp: 1546264800
 #highest_val:
