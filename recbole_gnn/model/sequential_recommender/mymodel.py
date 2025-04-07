@@ -27,8 +27,8 @@ from recbole.model.layers import TransformerEncoder
 from recbole.model.loss import BPRLoss
 import torch.fft as fft
 import torch.nn.functional as F
-from recbole_gnn.model.layers import SRGNNCell
-from torch_geometric.utils import dropout_edge, dropout_node, dropout_path
+from recbole_gnn.model.layers import SRGNNCell, SRGNNConv, LightGCNConv
+from torch_geometric.utils import dropout_edge, dropout_node, add_random_edge, dropout_path, normalize_edge_index
 
 class MyModel(SequentialRecommender):
     def __init__(self, config, dataset):
@@ -41,7 +41,6 @@ class MyModel(SequentialRecommender):
         self.inner_size = config['inner_size']  # the dimensionality in feed-forward layer
         self.hidden_dropout_prob = config['hidden_dropout_prob']
         self.attn_dropout_prob = config['attn_dropout_prob']
-        self.graph_dropout_prob = config['grap_dropout_prob']
         self.hidden_act = config['hidden_act']
         self.layer_norm_eps = config['layer_norm_eps']
 
@@ -86,12 +85,12 @@ class MyModel(SequentialRecommender):
         self.mask_default = self.mask_correlated_samples(batch_size=self.batch_size)
         self.nce_fct = nn.CrossEntropyLoss()
 
-        self.gnn = SRGNNCell(self.hidden_size)
+        self.gnn = SRGNNConv(self.hidden_size)
         self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_2 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_3 = nn.Linear(self.hidden_size, 1, bias=False)
         self.linear_out = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=True)
-        self.dropout_g = nn.Dropout(self.graph_dropout_prob)
+        self.dropout_g = nn.Dropout(self.hidden_dropout_prob)
 
         self.apply(self._init_weights)
 
@@ -212,10 +211,10 @@ class MyModel(SequentialRecommender):
             input_emb = self.fft_layer(input_emb)
 
         trm_output = self.trm_encoder(input_emb, extended_attention_mask, output_all_encoded_layers=True)
-        output_t = trm_output[-1]
-        output_t = self.gather_indexes(output_t, item_seq_len - 1)
+        output = trm_output[-1]
+        output = self.gather_indexes(output, item_seq_len - 1)
 
-        return output_t
+        return output
     
     def forward_gcn(self, interaction, item_seq, item_seq_len, disturb=False):
         x = interaction['x']
@@ -228,9 +227,7 @@ class MyModel(SequentialRecommender):
         old_hidden = hidden.clone()
         if disturb:
             noise = self.gaussian_noise(hidden, self.noise_base)
-            mask1 = x.gt(0).unsqueeze(dim=1)
-            noise1 = noise * mask1
-            hidden = hidden + noise1
+            hidden = hidden + noise
             rand = random.sample(range(3), 1)
             if rand == 0:
                 edge_droped, _ = dropout_edge(edge_index)
@@ -251,61 +248,44 @@ class MyModel(SequentialRecommender):
         a = torch.sum(alpha * seq_hidden * mask.view(mask.size(0), -1, 1).float(), 1)
         seq_output = self.linear_out(torch.cat([a, ht], dim=1))
         return seq_output
-    
-    def my_fft(self, seq):
-        f = torch.fft.rfft(seq, dim=1)
-        amp = torch.absolute(f)
-        phase = torch.angle(f)
-        return amp, phase
-    
+
     def calculate_loss(self, interaction):
-        # cal loss
         loss = torch.tensor(0.0).to(self.device)
-        loss += self.rec_weight * self.rec_loss(interaction, self.forward)
-        loss += (1 - self.rec_weight) * self.rec_loss(interaction, self.forward_gcn)
-        loss += self.cl_weight * self.cl_loss(interaction)
-        return loss
-    
-    def cl_loss(self, interaction):
-        loss = torch.tensor(0.0).to(self.device)
+
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
+        tf_seq_output = self.forward(interaction, item_seq, item_seq_len)
+        gnn_seq_output = self.forward_gcn(interaction, item_seq, item_seq_len)
         aug_seq1, aug_len1, aug_seq2, aug_len2 = self.augmentation(interaction)
         tf_seq_output_f_1 = self.forward(interaction, aug_seq1, aug_len1, True)
         tf_seq_output_f_2 = self.forward(interaction, aug_seq2, aug_len2, True)
         gnn_seq_output_1 = self.forward_gcn(interaction, item_seq, item_seq_len, True)
         gnn_seq_output_2 = self.forward_gcn(interaction, item_seq, item_seq_len, True)
 
-        loss += self.seq_cl_weight * self.infonce(tf_seq_output_f_1, tf_seq_output_f_2, temp=self.tau, batch_size=tf_seq_output_f_1.shape[0])
+        tf_recloss = self.rec_loss(interaction, tf_seq_output)
 
-        loss += (1 - self.seq_cl_weight) * self.infonce(gnn_seq_output_1, gnn_seq_output_2, temp=self.tau, batch_size=gnn_seq_output_1.shape[0])
+        gnn_recloss = self.rec_loss(interaction, gnn_seq_output)
+
+        tf_closs = self.infonce(tf_seq_output_f_1, tf_seq_output_f_2, temp=self.tau, batch_size=tf_seq_output_f_1.shape[0])
+
+        gnn_closs = self.infonce(gnn_seq_output_1, gnn_seq_output_2, temp=self.tau, batch_size=tf_seq_output.shape[0])
+
+        loss = (1 - self.rec_weight) * tf_recloss + self.rec_weight * gnn_recloss + self.cl_weight * (self.seq_cl_weight * tf_closs + (1 - self.seq_cl_weight) * gnn_closs )
 
         return loss
     
-    def rec_loss(self, interaction, forward):
-        # item_seq
-        item_seq = interaction[self.ITEM_SEQ]  # N(B) * L(sequence length), long truncation, not enough to fill 0
-        item_seq_len = interaction[self.ITEM_SEQ_LEN]
-        # seq_output It is the result of passing the input sequence forward through the neural network. It is a tensor of shape N * D, where N is the batch size and D is the dimension of the output
-        seq_output = forward(interaction, item_seq, item_seq_len)
-        # pos_items Represents a positive item associated with a given sequence.
+    def rec_loss(self, interaction, seq_output):
+
         pos_items = interaction[self.POS_ITEM_ID]
         if self.loss_type == 'BPR':
-            # Calculate Bayesian Personalized Ranking (BPR) losses, using positive and negative items and embeddings to calculate scores, and then calculate losses
             neg_items = interaction[self.NEG_ITEM_ID]
             pos_items_emb = self.item_embedding(pos_items)
             neg_items_emb = self.item_embedding(neg_items)
             pos_score = torch.sum(seq_output * pos_items_emb, dim=-1)  # [B]
             neg_score = torch.sum(seq_output * neg_items_emb, dim=-1)  # [B]
             loss = self.loss_fct(pos_score, neg_score)
-        else:  # self.loss_type == 'CE'
-            # 'CE'(cross entropy), then calculate the loss by embedding the item, using the softmax function
-            # item_emb get all
+        else:
             test_item_emb = self.item_embedding.weight
-            # seq_output and all item_emb do similarity calculation # tensor.transpose exchange matrix of two dimensions, transpose(dim0, dim1)
-            # torch.matmul is multiplication of tensor,
-            # Input can be high dimensional. 2D is normal matrix multiplication like tensor.mm.
-            # When there are multiple dimensions, the extra one dimension is brought out as batch, and the other parts do matrix multiplication
             logits = torch.matmul(seq_output, test_item_emb.transpose(0, 1))
             logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
             loss = self.loss_fct(logits, pos_items)
@@ -315,9 +295,7 @@ class MyModel(SequentialRecommender):
             loss = 1e-8
         return loss
     
-    def infonce(self, z_i, z_j, temp, batch_size):  # B * D    B * D  (batch_size * dim)
-        # Positive sample: It is the inner product of itself and itself, or the product of the NTH row in z_i and the NTH row in z_j.
-        # Negative sample: is the inner product of itself and itself, or the product of the zeroth row in z_i and the zeroth row in z_j.
+    def infonce(self, z_i, z_j, temp, batch_size):
         N = 2 * batch_size
         z = torch.cat((z_i, z_j), dim=0)
         if self.sim == 'cos':
@@ -326,12 +304,11 @@ class MyModel(SequentialRecommender):
             sim = torch.mm(z, z.T) / temp
 
         # Take the diagonal entries of the matrix
-        sim_i_j = torch.diag(sim, batch_size)  # B*1 # The main diagonal must be moved B rows up to be a positive sample
-        sim_j_i = torch.diag(sim, -batch_size)  # B*1 # The main diagonal must be moved B rows up to be a positive sample
+        sim_i_j = torch.diag(sim, batch_size)  
+        sim_j_i = torch.diag(sim, -batch_size) 
 
         positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)
-        # build negative samples
-        # mask
+
         if batch_size != self.batch_size:
             mask = self.mask_correlated_samples(batch_size)
         else:
@@ -341,7 +318,8 @@ class MyModel(SequentialRecommender):
         labels = torch.zeros(N).to(positive_samples.device).long()
         logits = torch.cat((positive_samples, negative_samples), dim=1)  # N * C
         logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
-        loss = self.nce_fct(logits+1e-8, labels)  # BPRLoss or CrossEntropyLoss(Cross entropy loss)
+        loss = self.nce_fct(logits+1e-8, labels)  
+        
         if torch.isnan(loss) or torch.isinf(loss):
             print("cl_loss_1:", loss)
             loss = 1e-8
