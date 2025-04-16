@@ -27,8 +27,8 @@ from recbole.model.layers import TransformerEncoder
 from recbole.model.loss import BPRLoss
 import torch.fft as fft
 import torch.nn.functional as F
-from recbole_gnn.model.layers import SRGNNCell, SRGNNConv, LightGCNConv
-from torch_geometric.utils import dropout_edge, dropout_node, add_random_edge, dropout_path, normalize_edge_index
+from recbole_gnn.model.layers import SRGNNCell
+from torch_geometric.utils import dropout_edge, dropout_node, add_random_edge, dropout_path
 
 class MyModel(SequentialRecommender):
     def __init__(self, config, dataset):
@@ -53,9 +53,8 @@ class MyModel(SequentialRecommender):
 
         self.device = config['device']
         self.noise_base = config['noise_base']
-        self.rec_weight = config['rec_weight']
+        self.tf_weight = config['tf_weight']
         self.cl_weight = config['cl_weight']
-        self.seq_cl_weight = config['seq_cl_weight']
 
         # define layers and loss
         self.item_embedding = nn.Embedding(self.n_items + 1, self.hidden_size, padding_idx=0)
@@ -85,7 +84,7 @@ class MyModel(SequentialRecommender):
         self.mask_default = self.mask_correlated_samples(batch_size=self.batch_size)
         self.nce_fct = nn.CrossEntropyLoss()
 
-        self.gnn = SRGNNConv(self.hidden_size)
+        self.gnn = SRGNNCell(self.hidden_size)
         self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_2 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_3 = nn.Linear(self.hidden_size, 1, bias=False)
@@ -105,72 +104,6 @@ class MyModel(SequentialRecommender):
             module.weight.data.fill_(1.0)
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
-
-    def augmentation(self, cur_data):
-        def item_crop(seq, length, eta=0.6):
-            seq_cpu = seq.clone().cpu()
-            num_left = math.floor(length * eta)
-            crop_begin = random.randint(0, length - num_left)
-            croped_item_seq = np.zeros(seq_cpu.shape[0])
-            if crop_begin + num_left < seq_cpu.shape[0]:
-                croped_item_seq[:num_left] = seq_cpu[crop_begin:crop_begin + num_left]
-            else:
-                croped_item_seq[:num_left] = seq_cpu[crop_begin:]
-            return torch.tensor(croped_item_seq, dtype=torch.long, device=seq.device), torch.tensor(num_left, dtype=torch.long, device=seq.device)
-        
-        def item_mask(seq, length, gamma=0.3):
-            num_mask = math.floor(length * gamma)
-            mask_index = random.sample(range(length), k=num_mask)
-            masked_item_seq = seq[:]
-            masked_item_seq[mask_index] = self.n_items  # token 0 has been used for semantic masking
-            return masked_item_seq, length
-        
-        def item_reorder(seq, length, beta=0.6):
-            num_reorder = math.floor(length * beta)
-            reorder_begin = random.randint(0, length - num_reorder)
-            reordered_item_seq = seq[:]
-            shuffle_index = list(range(reorder_begin, reorder_begin + num_reorder))
-            random.shuffle(shuffle_index)
-            reordered_item_seq[reorder_begin:reorder_begin + num_reorder] = reordered_item_seq[shuffle_index]
-            return reordered_item_seq, length
-        
-        seqs = cur_data['item_id_list'].clone()
-        lengths = cur_data['item_length'].clone()
-
-        aug_seq1 = []
-        aug_len1 = []
-        aug_seq2 = []
-        aug_len2 = []
-        for seq, length in zip(seqs, lengths):
-            if length > 5:
-                switch = random.sample(range(3), k=2)
-            elif 1 < length < 5:
-                switch = [2, 2]
-            else:
-                switch = [3, 3]
-                aug_seq = seq
-                aug_len = length
-            if switch[0] == 0:
-                aug_seq, aug_len = item_crop(seq, length)
-            elif switch[0] == 1:
-                aug_seq, aug_len = item_mask(seq, length)
-            elif switch[0] == 2:
-                aug_seq, aug_len = item_reorder(seq, length)
-    
-            aug_seq1.append(aug_seq)
-            aug_len1.append(aug_len)
-    
-            if switch[1] == 0:
-                aug_seq, aug_len = item_crop(seq, length)
-            elif switch[1] == 1:
-                aug_seq, aug_len = item_mask(seq, length)
-            elif switch[1] == 2:
-                aug_seq, aug_len = item_reorder(seq, length)
-    
-            aug_seq2.append(aug_seq)
-            aug_len2.append(aug_len)
-            
-        return torch.stack(aug_seq1), torch.stack(aug_len1), torch.stack(aug_seq2), torch.stack(aug_len2)
     
     def get_attention_mask(self, item_seq):
         """Generate left-to-right uni-directional attention mask for multi-head attention."""
@@ -248,15 +181,23 @@ class MyModel(SequentialRecommender):
         a = torch.sum(alpha * seq_hidden * mask.view(mask.size(0), -1, 1).float(), 1)
         seq_output = self.linear_out(torch.cat([a, ht], dim=1))
         return seq_output
-
+    
+    def my_fft(self, seq):
+        f = torch.fft.rfft(seq, dim=1)
+        amp = torch.absolute(f)
+        phase = torch.angle(f)
+        return amp, phase
+    
     def calculate_loss(self, interaction):
         loss = torch.tensor(0.0).to(self.device)
 
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
+
+        aug_seq1, aug_len1, aug_seq2, aug_len2 = interaction['aug1'], interaction['aug_len1'], interaction['aug2'], interaction['aug_len2']
+
         tf_seq_output = self.forward(interaction, item_seq, item_seq_len)
         gnn_seq_output = self.forward_gcn(interaction, item_seq, item_seq_len)
-        aug_seq1, aug_len1, aug_seq2, aug_len2 = self.augmentation(interaction)
         tf_seq_output_f_1 = self.forward(interaction, aug_seq1, aug_len1, True)
         tf_seq_output_f_2 = self.forward(interaction, aug_seq2, aug_len2, True)
         gnn_seq_output_1 = self.forward_gcn(interaction, item_seq, item_seq_len, True)
@@ -270,12 +211,11 @@ class MyModel(SequentialRecommender):
 
         gnn_closs = self.infonce(gnn_seq_output_1, gnn_seq_output_2, temp=self.tau, batch_size=tf_seq_output.shape[0])
 
-        loss = (1 - self.rec_weight) * tf_recloss + self.rec_weight * gnn_recloss + self.cl_weight * (self.seq_cl_weight * tf_closs + (1 - self.seq_cl_weight) * gnn_closs )
+        loss = self.tf_weight * tf_recloss + (1 - self.tf_weight) * gnn_recloss + self.cl_weight * (self.tf_weight * tf_closs + (1 - self.tf_weight) * gnn_closs )
 
         return loss
     
     def rec_loss(self, interaction, seq_output):
-
         pos_items = interaction[self.POS_ITEM_ID]
         if self.loss_type == 'BPR':
             neg_items = interaction[self.NEG_ITEM_ID]
@@ -303,8 +243,7 @@ class MyModel(SequentialRecommender):
         elif self.sim == 'dot':
             sim = torch.mm(z, z.T) / temp
 
-        # Take the diagonal entries of the matrix
-        sim_i_j = torch.diag(sim, batch_size)  
+        sim_i_j = torch.diag(sim, batch_size) 
         sim_j_i = torch.diag(sim, -batch_size) 
 
         positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)
@@ -318,8 +257,7 @@ class MyModel(SequentialRecommender):
         labels = torch.zeros(N).to(positive_samples.device).long()
         logits = torch.cat((positive_samples, negative_samples), dim=1)  # N * C
         logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
-        loss = self.nce_fct(logits+1e-8, labels)  
-        
+        loss = self.nce_fct(logits+1e-8, labels)
         if torch.isnan(loss) or torch.isinf(loss):
             print("cl_loss_1:", loss)
             loss = 1e-8
