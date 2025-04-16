@@ -56,6 +56,10 @@ def create_dataset(config):
     dataset = dataset_class(config)
     if config['save_dataset']:
         dataset.save()
+
+    config['n_items'] = dataset.item_num
+    config['n_users'] = dataset.user_num
+    
     return dataset
 
 
@@ -120,9 +124,9 @@ def data_preparation(config, dataset):
             train_dataset, valid_dataset, test_dataset = built_datasets
             train_sampler, valid_sampler, test_sampler = create_samplers(config, dataset, built_datasets)
 
-            train_data = _get_customized_dataloader(config, 'train')(config, train_dataset, train_sampler, shuffle=True)
-            valid_data = _get_customized_dataloader(config, 'evaluation')(config, valid_dataset, valid_sampler, shuffle=False)
-            test_data = _get_customized_dataloader(config, 'evaluation')(config, test_dataset, test_sampler, shuffle=False)
+            train_data = _get_customized_dataloader(config, 'train')(config, train_dataset, train_sampler, shuffle=True, phase='train')
+            valid_data = _get_customized_dataloader(config, 'evaluation')(config, valid_dataset, valid_sampler, shuffle=False, phase='evaluation')
+            test_data = _get_customized_dataloader(config, 'evaluation')(config, test_dataset, test_sampler, shuffle=False, phase='test')
             if config['save_dataloaders']:
                 save_split_dataloaders(config, dataloaders=(train_data, valid_data, test_data))
 

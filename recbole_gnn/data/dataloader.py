@@ -7,17 +7,17 @@ from recbole_gnn.data.transform import gnn_construct_transform
 
 
 class CustomizedTrainDataLoader(TrainDataLoader):
-    def __init__(self, config, dataset, sampler, shuffle=False):
+    def __init__(self, config, dataset, sampler, shuffle=False, phase='train'):
         super().__init__(config, dataset, sampler, shuffle=shuffle)
         if config['gnn_transform'] is not None:
-            self.transform = gnn_construct_transform(config)
+            self.transform = gnn_construct_transform(config, phase)
 
 
 class CustomizedNegSampleEvalDataLoader(NegSampleEvalDataLoader):
-    def __init__(self, config, dataset, sampler, shuffle=False):
+    def __init__(self, config, dataset, sampler, shuffle=False, phase='train'):
         super().__init__(config, dataset, sampler, shuffle=shuffle)
         if config['gnn_transform'] is not None:
-            self.transform = gnn_construct_transform(config)
+            self.transform = gnn_construct_transform(config, phase)
 
     def collate_fn(self, index):
         index = np.array(index)
@@ -53,7 +53,7 @@ class CustomizedNegSampleEvalDataLoader(NegSampleEvalDataLoader):
 
 
 class CustomizedFullSortEvalDataLoader(FullSortEvalDataLoader):
-    def __init__(self, config, dataset, sampler, shuffle=False):
+    def __init__(self, config, dataset, sampler, shuffle=False, phase='train'):
         super().__init__(config, dataset, sampler, shuffle=shuffle)
         if config['gnn_transform'] is not None:
-            self.transform = gnn_construct_transform(config)
+            self.transform = gnn_construct_transform(config, phase)
